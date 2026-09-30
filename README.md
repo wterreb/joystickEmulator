@@ -67,6 +67,44 @@ Notes:
 - Channel values are printed on the USB serial console at 115200 baud.
 - The firmware decodes and prints all 16 CRSF RC channels.
 
+## CAN Driver Module Wiring (1 Mbps)
+
+The ESP32 has the CAN controller built in, but needs an external CAN transceiver
+module (for example SN65HVD230 or TJA1050 style board).
+
+Use these ESP32 pins for CAN:
+
+- ESP32 GPIO21 (CAN TX) -> Transceiver RXD
+- ESP32 GPIO22 (CAN RX) -> Transceiver TXD
+- ESP32 GND -> Transceiver GND
+- ESP32 3.3V or 5V -> Transceiver VCC (match your transceiver board requirement)
+- Transceiver CANH -> CAN bus CANH
+- Transceiver CANL -> CAN bus CANL
+
+Important notes:
+
+- Firmware config uses 1 Mbps CAN bitrate.
+- Use 120 ohm termination at each end of the CAN bus.
+- Keep grounds shared between all CAN nodes.
+- ESP32 GPIO is 3.3V logic, so make sure your transceiver module is logic-compatible.
+
+Current firmware behavior:
+
+- It sends a CAN frame every 20 ms (50 Hz).
+- Frame ID is 0x120.
+- By default it sends CH1 as X and CH2 as Y until you confirm the exact right-stick channels.
+- X and Y are normalized to -1000..+1000 (center stick = 0).
+- A center deadband is applied (default +/-20) so small jitter reports as 0.
+- CAN payload packs X and Y as little-endian signed int16 values in bytes [0..3].
+- USB serial output prints all channels and a live hint of the two most-active channels
+	while you move the right stick.
+
+Deadband tuning:
+
+- Adjust `kNormalizeDeadband` in `src/main.cpp` to change center sensitivity.
+- Lower value = more sensitive around center, higher value = more stable zero.
+
 ## Notes
 
-The board you listed is an ESP32 board, not an STM32 board. This project uses the ESP32 toolchain and Arduino core instead of STM32Cube.
+The MCU board used is ESP32 WeAct ESP32 Development Board TYPE-C CH340K WiFi+Bluetooth Dual Core ESP32-DOWD-V3.
+The CRSF receiver is HelloRadio HR8E ELRS 2.4G 9-Channel PWM Power Supply DC 4.5-7.4 V Receiver Dual Antenna
