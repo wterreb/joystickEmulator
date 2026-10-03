@@ -1,14 +1,14 @@
 #include <Arduino.h>
-#include <driver/twai.h>
 
 namespace {
 
 constexpr int kElrsRxPin = 16;  // ESP32 receives on GPIO16 from ELRS TX
 constexpr int kElrsTxPin = 17;  // ESP32 transmits on GPIO17 to ELRS RX
 constexpr uint32_t kElrsBaud = 420000;
-constexpr int kCanRxPin = 22;   // ESP32 receives from CAN transceiver TXD
-constexpr int kCanTxPin = 21;   // ESP32 transmits to CAN transceiver RXD
-constexpr uint32_t kCanTxIntervalMs = 20;
+constexpr int kDataUartRxPin = 26;  // Optional RX pin for downstream UART input
+constexpr int kDataUartTxPin = 25;  // TX pin used to stream joystick X,Y
+constexpr uint32_t kDataUartBaud = 115200;
+constexpr uint32_t kDataTxIntervalMs = 20;
 constexpr uint32_t kDetectPrintIntervalMs = 1000;
 constexpr uint32_t kStickHintThreshold = 120;
 constexpr uint32_t kCrsfFailsafeTimeoutMs = 500;
@@ -16,10 +16,9 @@ constexpr uint32_t kCrsfFailsafeTimeoutMs = 500;
 // Default mapping for many EdgeTX/OpenTX profiles is AETR:
 // CH1=Roll, CH2=Pitch, CH3=Throttle, CH4=Yaw.
 // Update these indexes later if your model mapping differs.
-constexpr uint8_t kCanChannelX = 0;  // CH1 by default
-constexpr uint8_t kCanChannelY = 1;  // CH2 by default
+constexpr uint8_t kOutputChannelX = 0;  // CH1 by default
+constexpr uint8_t kOutputChannelY = 1;  // CH2 by default
 
-constexpr uint16_t kCanFrameId = 0x120;
 constexpr uint8_t kMaxFrameLen = 64;
 constexpr uint8_t kCrsfAddressFlightController = 0xC8;
 constexpr uint8_t kCrsfFrameTypeRcChannelsPacked = 0x16;
@@ -31,13 +30,13 @@ constexpr uint16_t kCrsfMax = 1811;
 constexpr int16_t kNormalizeDeadband = 20;
 
 HardwareSerial ElrsUart(2);
+HardwareSerial DataUart(1);
 uint16_t g_channels[16] = {0};
 uint16_t g_prevChannels[16] = {0};
 uint32_t g_channelActivity[16] = {0};
 bool g_channelsValid = false;
-bool g_canReady = false;
 uint32_t g_lastPrintMs = 0;
-uint32_t g_lastCanTxMs = 0;
+uint32_t g_lastDataTxMs = 0;
 uint32_t g_lastDetectPrintMs = 0;
 uint32_t g_lastCrsfFrameMs = 0;
 
@@ -170,54 +169,11 @@ void printLikelyRightStickChannels() {
   }
 }
 
-bool initCan() {
-  twai_general_config_t generalConfig =
-      TWAI_GENERAL_CONFIG_DEFAULT(static_cast<gpio_num_t>(kCanTxPin),
-                                  static_cast<gpio_num_t>(kCanRxPin), TWAI_MODE_NORMAL);
-  twai_timing_config_t timingConfig = TWAI_TIMING_CONFIG_1MBITS();
-  twai_filter_config_t filterConfig = TWAI_FILTER_CONFIG_ACCEPT_ALL();
-
-  esp_err_t err = twai_driver_install(&generalConfig, &timingConfig, &filterConfig);
-  if (err != ESP_OK) {
-    Serial.print("CAN driver install failed, err=");
-    Serial.println(err);
-    return false;
-  }
-
-  err = twai_start();
-  if (err != ESP_OK) {
-    Serial.print("CAN start failed, err=");
-    Serial.println(err);
-    twai_driver_uninstall();
-    return false;
-  }
-
-  return true;
-}
-
-void sendCanFrame(int16_t chX, int16_t chY) {
-  if (!g_canReady) {
-    return;
-  }
-
-  twai_message_t msg = {};
-  msg.identifier = kCanFrameId;
-  msg.extd = 0;
-  msg.rtr = 0;
-  msg.data_length_code = 8;
-
-  msg.data[0] = static_cast<uint8_t>(chX & 0xFF);
-  msg.data[1] = static_cast<uint8_t>((chX >> 8) & 0xFF);
-  msg.data[2] = static_cast<uint8_t>(chY & 0xFF);
-  msg.data[3] = static_cast<uint8_t>((chY >> 8) & 0xFF);
-
-  // Echo source channels in payload to simplify downstream bring-up.
-  msg.data[4] = static_cast<uint8_t>(kCanChannelX + 1);
-  msg.data[5] = static_cast<uint8_t>(kCanChannelY + 1);
-  msg.data[6] = 0;
-  msg.data[7] = 0;
-
-  twai_transmit(&msg, 0);
+void sendJoystickUartFrame(int16_t x, int16_t y) {
+  DataUart.print(x);
+  DataUart.print(',');
+  DataUart.print(y);
+  DataUart.print("\r\n");
 }
 
 void processCrsf() {
@@ -295,18 +251,13 @@ void setup() {
   Serial.println("USB Serial: 115200");
   Serial.println("ELRS UART2: 420000 on GPIO16(RX), GPIO17(TX)");
   Serial.println("Wiring: ELRS TX -> GPIO16, ELRS RX -> GPIO17, GND -> GND");
-  Serial.println("CAN (TWAI): 1Mbps on GPIO21(TX), GPIO22(RX)");
-  Serial.println("Default CAN channels: CH1->X, CH2->Y (update after live detect)");
+  Serial.println("Output UART1: 115200 on GPIO25(TX), GPIO26(RX)");
+  Serial.println("Default output channels: CH1->X, CH2->Y (update after live detect)");
   Serial.println("========================================");
 
   ElrsUart.begin(kElrsBaud, SERIAL_8N1, kElrsRxPin, kElrsTxPin);
-  g_canReady = initCan();
-
-  if (g_canReady) {
-    Serial.println("CAN initialized at 1Mbps");
-  } else {
-    Serial.println("CAN initialization failed");
-  }
+  DataUart.begin(kDataUartBaud, SERIAL_8N1, kDataUartRxPin, kDataUartTxPin);
+  Serial.println("Output UART1 initialized at 115200");
 }
 
 void loop() {
@@ -320,16 +271,16 @@ void loop() {
   }
 
   if (g_channelsValid && (now - g_lastPrintMs) >= kPrintIntervalMs) {
-    const int16_t normX = applyDeadband(normalizeCrsfTo1000(g_channels[kCanChannelX]));
-    const int16_t normY = applyDeadband(normalizeCrsfTo1000(g_channels[kCanChannelY]));
+    const int16_t normX = applyDeadband(normalizeCrsfTo1000(g_channels[kOutputChannelX]));
+    const int16_t normY = applyDeadband(normalizeCrsfTo1000(g_channels[kOutputChannelY]));
 
     printChannels(g_channels);
     Serial.print("Norm: X(CH");
-    Serial.print(kCanChannelX + 1);
+    Serial.print(kOutputChannelX + 1);
     Serial.print(")=");
     Serial.print(normX);
     Serial.print("  Y(CH");
-    Serial.print(kCanChannelY + 1);
+    Serial.print(kOutputChannelY + 1);
     Serial.print(")=");
     Serial.print(normY);
     Serial.print("  deadband=");
@@ -338,10 +289,10 @@ void loop() {
     g_lastPrintMs = now;
   }
 
-  if (g_channelsValid && (now - g_lastCanTxMs) >= kCanTxIntervalMs) {
-    sendCanFrame(applyDeadband(normalizeCrsfTo1000(g_channels[kCanChannelX])),
-                 applyDeadband(normalizeCrsfTo1000(g_channels[kCanChannelY])));
-    g_lastCanTxMs = now;
+  if (g_channelsValid && (now - g_lastDataTxMs) >= kDataTxIntervalMs) {
+    sendJoystickUartFrame(applyDeadband(normalizeCrsfTo1000(g_channels[kOutputChannelX])),
+                          applyDeadband(normalizeCrsfTo1000(g_channels[kOutputChannelY])));
+    g_lastDataTxMs = now;
   }
 
   if (g_channelsValid && (now - g_lastDetectPrintMs) >= kDetectPrintIntervalMs) {

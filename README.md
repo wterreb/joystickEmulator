@@ -67,35 +67,29 @@ Notes:
 - Channel values are printed on the USB serial console at 115200 baud.
 - The firmware decodes and prints all 16 CRSF RC channels.
 
-## CAN Driver Module Wiring (1 Mbps)
+## Joystick Output UART Wiring
 
-The ESP32 has the CAN controller built in, but needs an external CAN transceiver
-module (for example SN65HVD230 or TJA1050 style board).
+The firmware now outputs normalized joystick X,Y values over a dedicated UART
+instead of CAN.
 
-Use these ESP32 pins for CAN:
+Use these ESP32 pins for the output UART:
 
-- ESP32 GPIO21 (CAN TX) -> Transceiver RXD
-- ESP32 GPIO22 (CAN RX) -> Transceiver TXD
-- ESP32 GND -> Transceiver GND
-- ESP32 3.3V or 5V -> Transceiver VCC (match your transceiver board requirement)
-- Transceiver CANH -> CAN bus CANH
-- Transceiver CANL -> CAN bus CANL
+- ESP32 GPIO25 (UART1 TX) -> Receiver UART RX
+- ESP32 GPIO26 (UART1 RX) -> Optional, only needed if you later want inbound UART data
+- ESP32 GND -> Receiver GND
 
 Important notes:
 
-- Firmware config uses 1 Mbps CAN bitrate.
-- Use 120 ohm termination at each end of the CAN bus.
-- Keep grounds shared between all CAN nodes.
-- ESP32 GPIO is 3.3V logic, so make sure your transceiver module is logic-compatible.
+- Output UART baudrate is 115200, 8N1, no CTS/RTS flow control.
+- USB-C debug output remains on the normal USB serial at 115200.
 
 Current firmware behavior:
 
-- It sends a CAN frame every 20 ms (50 Hz).
-- Frame ID is 0x120.
+- It sends one UART line every 20 ms (50 Hz) on UART1 TX (GPIO25).
 - By default it sends CH1 as X and CH2 as Y until you confirm the exact right-stick channels.
 - X and Y are normalized to -1000..+1000 (center stick = 0).
 - A center deadband is applied (default +/-20) so small jitter reports as 0.
-- CAN payload packs X and Y as little-endian signed int16 values in bytes [0..3].
+- UART payload format is text: `X,Y\r\n` (example: `-123,456\r\n`).
 - USB serial output prints all channels and a live hint of the two most-active channels
 	while you move the right stick.
 
