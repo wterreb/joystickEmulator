@@ -9,8 +9,6 @@ constexpr int kDataUartRxPin = 26;  // Optional RX pin for downstream UART input
 constexpr int kDataUartTxPin = 25;  // TX pin used to stream joystick X,Y
 constexpr uint32_t kDataUartBaud = 115200;
 constexpr uint32_t kDataTxIntervalMs = 20;
-constexpr uint32_t kDetectPrintIntervalMs = 1000;
-constexpr uint32_t kStickHintThreshold = 120;
 constexpr uint32_t kCrsfFailsafeTimeoutMs = 500;
 
 // Default mapping for many EdgeTX/OpenTX profiles is AETR:
@@ -32,17 +30,13 @@ constexpr int16_t kNormalizeDeadband = 20;
 HardwareSerial ElrsUart(2);
 HardwareSerial DataUart(1);
 uint16_t g_channels[16] = {0};
-uint16_t g_prevChannels[16] = {0};
-uint32_t g_channelActivity[16] = {0};
 bool g_channelsValid = false;
 uint32_t g_lastPrintMs = 0;
 uint32_t g_lastDataTxMs = 0;
-uint32_t g_lastDetectPrintMs = 0;
+bool g_linkWasLost = false;
+int16_t g_lastPrintedX = INT16_MIN;
+int16_t g_lastPrintedY = INT16_MIN;
 uint32_t g_lastCrsfFrameMs = 0;
-
-const char* kChannelLabels[16] = {
-  "Roll", "Pitch", "Throttle", "Yaw", "AUX1", "AUX2", "AUX3", "AUX4",
-  "AUX5", "AUX6", "AUX7",     "AUX8", "AUX9", "AUX10", "AUX11", "AUX12"};
 
 uint8_t crsfCrc8(const uint8_t* data, size_t len) {
   uint8_t crc = 0;
@@ -78,22 +72,6 @@ void decodePackedRcChannels(const uint8_t* payload, uint16_t* outChannels) {
   }
 }
 
-void printChannels(const uint16_t* channels) {
-  Serial.print("RC: ");
-  for (uint8_t i = 0; i < 16; i++) {
-    Serial.print(i + 1);
-    Serial.print('(');
-    Serial.print(kChannelLabels[i]);
-    Serial.print(')');
-    Serial.print('=');
-    Serial.print(channels[i]);
-    if (i != 15) {
-      Serial.print("  ");
-    }
-  }
-  Serial.println();
-}
-
 int16_t normalizeCrsfTo1000(uint16_t raw) {
   if (raw == kCrsfCenter) {
     return 0;
@@ -124,49 +102,6 @@ int16_t applyDeadband(int16_t value) {
     return 0;
   }
   return value;
-}
-
-void updateActivity(const uint16_t* channels) {
-  for (uint8_t i = 0; i < 16; i++) {
-    uint16_t current = channels[i];
-    uint16_t previous = g_prevChannels[i];
-    uint16_t delta = current > previous ? (current - previous) : (previous - current);
-    g_channelActivity[i] += delta;
-    g_prevChannels[i] = current;
-  }
-}
-
-void printLikelyRightStickChannels() {
-  uint8_t firstIndex = 0;
-  uint8_t secondIndex = 1;
-
-  for (uint8_t i = 0; i < 16; i++) {
-    if (g_channelActivity[i] > g_channelActivity[firstIndex]) {
-      secondIndex = firstIndex;
-      firstIndex = i;
-    } else if (i != firstIndex && g_channelActivity[i] > g_channelActivity[secondIndex]) {
-      secondIndex = i;
-    }
-  }
-
-  Serial.print("Hint: move only right stick. Most active channels now: CH");
-  Serial.print(firstIndex + 1);
-  Serial.print(" (");
-  Serial.print(kChannelLabels[firstIndex]);
-  Serial.print(") and CH");
-  Serial.print(secondIndex + 1);
-  Serial.print(" (");
-  Serial.print(kChannelLabels[secondIndex]);
-  Serial.println(")");
-
-  if (g_channelActivity[firstIndex] < kStickHintThreshold ||
-      g_channelActivity[secondIndex] < kStickHintThreshold) {
-    Serial.println("Hint quality is low. Move only the right stick farther for a cleaner detect.");
-  }
-
-  for (uint8_t i = 0; i < 16; i++) {
-    g_channelActivity[i] = 0;
-  }
 }
 
 void sendJoystickUartFrame(int16_t x, int16_t y) {
@@ -230,7 +165,6 @@ void processCrsf() {
             frameType == kCrsfFrameTypeRcChannelsPacked &&
             payloadLen == kRcPayloadLen) {
           decodePackedRcChannels(payload, g_channels);
-          updateActivity(g_channels);
           g_lastCrsfFrameMs = millis();
           g_channelsValid = true;
         }
@@ -258,6 +192,21 @@ void setup() {
   ElrsUart.begin(kElrsBaud, SERIAL_8N1, kElrsRxPin, kElrsTxPin);
   DataUart.begin(kDataUartBaud, SERIAL_8N1, kDataUartRxPin, kDataUartTxPin);
   Serial.println("Output UART1 initialized at 115200");
+
+  // Loopback self-test: with GPIO17 jumpered to GPIO16 (receiver disconnected) this should pass.
+  while (ElrsUart.available() > 0) {
+    ElrsUart.read();
+  }
+  const uint8_t testBytes[4] = {0x55, 0xAA, 0x0F, 0xF0};
+  ElrsUart.write(testBytes, sizeof(testBytes));
+  ElrsUart.flush();
+  delay(20);
+  const int echoed = ElrsUart.available();
+  Serial.printf("Loopback self-test: sent 4, received %d (%s)\n", echoed,
+                echoed == 4 ? "PASS - GPIO16/17 jumpered" : "no loopback - normal if receiver is wired");
+  while (ElrsUart.available() > 0) {
+    ElrsUart.read();
+  }
 }
 
 void loop() {
@@ -267,25 +216,28 @@ void loop() {
 
   if (g_channelsValid && (now - g_lastCrsfFrameMs) > kCrsfFailsafeTimeoutMs) {
     g_channelsValid = false;
+    g_linkWasLost = true;
     Serial.println("Warning: CRSF stream timeout");
   }
 
+  if (g_channelsValid && g_linkWasLost) {
+    g_linkWasLost = false;
+    Serial.println("CRSF stream resumed");
+  }
+
+  // Print X/Y only when they change, at most every kPrintIntervalMs.
   if (g_channelsValid && (now - g_lastPrintMs) >= kPrintIntervalMs) {
     const int16_t normX = applyDeadband(normalizeCrsfTo1000(g_channels[kOutputChannelX]));
     const int16_t normY = applyDeadband(normalizeCrsfTo1000(g_channels[kOutputChannelY]));
 
-    printChannels(g_channels);
-    Serial.print("Norm: X(CH");
-    Serial.print(kOutputChannelX + 1);
-    Serial.print(")=");
-    Serial.print(normX);
-    Serial.print("  Y(CH");
-    Serial.print(kOutputChannelY + 1);
-    Serial.print(")=");
-    Serial.print(normY);
-    Serial.print("  deadband=");
-    Serial.print(kNormalizeDeadband);
-    Serial.println();
+    if (normX != g_lastPrintedX || normY != g_lastPrintedY) {
+      Serial.print("X=");
+      Serial.print(normX);
+      Serial.print(" Y=");
+      Serial.println(normY);
+      g_lastPrintedX = normX;
+      g_lastPrintedY = normY;
+    }
     g_lastPrintMs = now;
   }
 
@@ -295,8 +247,4 @@ void loop() {
     g_lastDataTxMs = now;
   }
 
-  if (g_channelsValid && (now - g_lastDetectPrintMs) >= kDetectPrintIntervalMs) {
-    printLikelyRightStickChannels();
-    g_lastDetectPrintMs = now;
-  }
 }
