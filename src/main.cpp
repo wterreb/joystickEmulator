@@ -8,6 +8,10 @@ constexpr uint32_t kElrsBaud = 420000;
 constexpr int kDataUartRxPin = 26;  // Optional RX pin for downstream UART input
 constexpr int kDataUartTxPin = 25;  // TX pin used to stream joystick X,Y
 constexpr uint32_t kDataUartBaud = 115200;
+constexpr int kStatusLedPin = 22;  // WeAct ESP32 Core onboard LED (active low)
+constexpr uint8_t kLedOn = LOW;
+constexpr uint8_t kLedOff = HIGH;
+constexpr uint32_t kLedBlinkIntervalMs = 250;
 constexpr uint32_t kDataTxIntervalMs = 20;
 constexpr uint32_t kCrsfFailsafeTimeoutMs = 500;
 
@@ -176,6 +180,8 @@ void processCrsf() {
 }  // namespace
 
 void setup() {
+  pinMode(kStatusLedPin, OUTPUT);
+  digitalWrite(kStatusLedPin, kLedOff);
   Serial.begin(115200);
   delay(1000);
 
@@ -213,6 +219,13 @@ void loop() {
   processCrsf();
 
   const uint32_t now = millis();
+
+  // Solid when receiving valid RC data, flashing when not.
+  if (g_channelsValid) {
+    digitalWrite(kStatusLedPin, kLedOn);
+  } else {
+    digitalWrite(kStatusLedPin, ((now / kLedBlinkIntervalMs) & 1) ? kLedOn : kLedOff);
+  }
 
   if (g_channelsValid && (now - g_lastCrsfFrameMs) > kCrsfFailsafeTimeoutMs) {
     g_channelsValid = false;

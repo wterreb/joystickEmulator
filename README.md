@@ -103,4 +103,7 @@ Deadband tuning:
 The MCU board used is ESP32 WeAct ESP32 Development Board TYPE-C CH340K WiFi+Bluetooth Dual Core ESP32-DOWD-V3.
 The CRSF receiver is HelloRadio HR8E ELRS 2.4G 9-Channel PWM Power Supply DC 4.5-7.4 V Receiver Dual Antenna
 
-Reconnect the receiver to the following pings: receiver TX to pin 16, receiver RX to pin 17, GND to GND. Power it from 5 V, with a shared GND.
+Wiring:
+UART0	GPIO1 (TX0), GPIO3 (RX0)	USB-C debug output
+UART1	GPIO25 (TX), GPIO26 (RX)	Joystick X,Y output
+UART2	GPIO16 (RX), GPIO17 (TX)	ELRS receiver
