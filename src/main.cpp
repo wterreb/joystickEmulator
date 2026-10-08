@@ -25,11 +25,15 @@ constexpr uint8_t kMaxFrameLen = 64;
 constexpr uint8_t kCrsfAddressFlightController = 0xC8;
 constexpr uint8_t kCrsfFrameTypeRcChannelsPacked = 0x16;
 constexpr uint8_t kRcPayloadLen = 22;
-constexpr uint32_t kPrintIntervalMs = 100;
+constexpr uint8_t kCrsfFrameTypeLinkStatistics = 0x14;
+constexpr uint8_t kLinkStatsPayloadLen = 10;
+constexpr uint8_t kLinkStatsLqIndex = 2;  // uplink link quality, 0-100%
+constexpr uint8_t kLinkStatsTxPowerIndex = 6;  // enum, see txPowerMw()
+constexpr uint32_t kPrintIntervalMs = 20;
 constexpr uint16_t kCrsfMin = 172;
 constexpr uint16_t kCrsfCenter = 992;
 constexpr uint16_t kCrsfMax = 1811;
-constexpr int16_t kNormalizeDeadband = 20;
+constexpr int16_t kNormalizeDeadband = 30;
 
 HardwareSerial ElrsUart(2);
 HardwareSerial DataUart(1);
@@ -38,8 +42,8 @@ bool g_channelsValid = false;
 uint32_t g_lastPrintMs = 0;
 uint32_t g_lastDataTxMs = 0;
 bool g_linkWasLost = false;
-int16_t g_lastPrintedX = INT16_MIN;
-int16_t g_lastPrintedY = INT16_MIN;
+uint8_t g_linkQuality = 0;
+uint16_t g_txPowerMw = 0;
 uint32_t g_lastCrsfFrameMs = 0;
 
 uint8_t crsfCrc8(const uint8_t* data, size_t len) {
@@ -115,6 +119,11 @@ void sendJoystickUartFrame(int16_t x, int16_t y) {
   DataUart.print("\r\n");
 }
 
+uint16_t txPowerMw(uint8_t index) {
+  static const uint16_t kPowerMw[] = {0, 10, 25, 100, 500, 1000, 2000, 250, 50};
+  return index < (sizeof(kPowerMw) / sizeof(kPowerMw[0])) ? kPowerMw[index] : 0;
+}
+
 void processCrsf() {
   static enum { kWaitAddress, kWaitLength, kReadBody } state = kWaitAddress;
   static uint8_t address = 0;
@@ -164,6 +173,13 @@ void processCrsf() {
         const uint8_t frameType = body[0];
         const uint8_t* payload = &body[1];
         const uint8_t payloadLen = static_cast<uint8_t>(length - 2);
+
+        if (address == kCrsfAddressFlightController &&
+            frameType == kCrsfFrameTypeLinkStatistics &&
+            payloadLen == kLinkStatsPayloadLen) {
+          g_linkQuality = payload[kLinkStatsLqIndex];
+          g_txPowerMw = txPowerMw(payload[kLinkStatsTxPowerIndex]);
+        }
 
         if (address == kCrsfAddressFlightController &&
             frameType == kCrsfFrameTypeRcChannelsPacked &&
@@ -238,19 +254,19 @@ void loop() {
     Serial.println("CRSF stream resumed");
   }
 
-  // Print X/Y only when they change, at most every kPrintIntervalMs.
+  // Print a status line every kPrintIntervalMs.
   if (g_channelsValid && (now - g_lastPrintMs) >= kPrintIntervalMs) {
     const int16_t normX = applyDeadband(normalizeCrsfTo1000(g_channels[kOutputChannelX]));
     const int16_t normY = applyDeadband(normalizeCrsfTo1000(g_channels[kOutputChannelY]));
 
-    if (normX != g_lastPrintedX || normY != g_lastPrintedY) {
-      Serial.print("X=");
-      Serial.print(normX);
-      Serial.print(" Y=");
-      Serial.println(normY);
-      g_lastPrintedX = normX;
-      g_lastPrintedY = normY;
-    }
+    Serial.print("X=");
+    Serial.print(normX);
+    Serial.print(" Y=");
+    Serial.print(normY);
+    Serial.print("  LQ=");
+    Serial.print(g_linkQuality);
+    Serial.print("  Tx=");
+    Serial.println(g_txPowerMw);
     g_lastPrintMs = now;
   }
 
